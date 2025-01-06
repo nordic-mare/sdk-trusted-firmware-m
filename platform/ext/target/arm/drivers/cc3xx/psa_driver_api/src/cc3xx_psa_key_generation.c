@@ -189,4 +189,118 @@ psa_status_t cc3xx_export_public_key(const psa_key_attributes_t *attributes,
         return PSA_ERROR_INVALID_ARGUMENT;
     }
 }
+
+static size_t calculate_ecc_key_size(size_t key_data_len, bool is_keypair)
+{
+    /* Keypairs are generally simpler because only the private key is used */
+    if (is_keypair) {
+        /* 521 bit curves are a special case since they are not a multiple of 8 */
+        if (key_data_len == PSA_BITS_TO_BYTES(521)) {
+            return 521;
+        }
+
+        return PSA_BYTES_TO_BITS(key_data_len);
+
+    }
+
+    /* For the SECP_R1, SECP_R2, SECP_K1 the public key has the structure
+     * 04 | X | Y and the bit size of the curve is equivalent to the X/Y length.
+     */
+    if (key_data_len == (1 + 2 * PSA_BITS_TO_BYTES(521))) {
+        return 521;
+    }
+
+    return PSA_BYTES_TO_BITS(key_data_len - 1) / 2;
+}
+
+static size_t calculate_key_size(psa_key_type_t key_type, size_t key_buff_len)
+{
+    /* For unstructured keys we can only rely on the buffer size to calculate the key size */
+    if (PSA_KEY_TYPE_IS_UNSTRUCTURED(key_type)) {
+        return PSA_BYTES_TO_BITS(key_buff_len);
+    }
+
+    if (PSA_KEY_TYPE_IS_ECC(key_type)) {
+        return calculate_ecc_key_size(key_buff_len, PSA_KEY_TYPE_IS_KEY_PAIR(key_type));
+    }
+
+    return PSA_ERROR_INVALID_ARGUMENT;
+}
+
+static psa_status_t validate_ecc_key_size(psa_ecc_family_t curve, size_t bits)
+{
+    switch (curve) {
+    case PSA_ECC_FAMILY_SECP_R1:
+        if (bits != 160 && bits != 192 && bits != 224 &&
+            bits != 256 && bits != 384 && bits != 521) {
+            return PSA_ERROR_INVALID_ARGUMENT;
+        }
+
+        return PSA_SUCCESS;
+    case PSA_ECC_FAMILY_SECP_K1:
+        if (bits != 160 && bits != 192 && bits != 224 && bits != 256) {
+            return PSA_ERROR_INVALID_ARGUMENT;
+        }
+
+        return PSA_SUCCESS;
+    case PSA_ECC_FAMILY_BRAINPOOL_P_R1:
+        if (bits != 256) {
+            return PSA_ERROR_NOT_SUPPORTED;
+        }
+
+        return PSA_SUCCESS;
+    default:
+        return PSA_ERROR_NOT_SUPPORTED;
+    }
+}
+
+static psa_status_t validate_key_size(psa_key_type_t type, size_t bits)
+{
+    if (PSA_KEY_TYPE_IS_ECC(type)) {
+        psa_ecc_family_t curve = PSA_KEY_TYPE_ECC_GET_FAMILY(type);
+        return validate_ecc_key_size(curve, bits);
+    }
+
+    return PSA_ERROR_NOT_SUPPORTED;
+}
+
+psa_status_t cc3xx_import_key(const psa_key_attributes_t *attributes,
+                              const uint8_t *data, size_t data_length,
+                              uint8_t *key_buffer, size_t key_buffer_size,
+                              size_t *key_buffer_length, size_t *key_bits)
+{
+    CC3XX_ASSERT(attributes != NULL);
+    CC3XX_ASSERT(data != NULL);
+    CC3XX_ASSERT(key_buffer != NULL);
+    CC3XX_ASSERT(key_buffer_length != NULL);
+    CC3XX_ASSERT(key_bits != NULL);
+
+    if (data_length > key_buffer_size) {
+        return PSA_ERROR_INVALID_ARGUMENT;
+    }
+
+    psa_status_t err = PSA_ERROR_CORRUPTION_DETECTED;
+    size_t attr_bits = psa_get_key_bits(attributes);
+    psa_key_type_t key_type = psa_get_key_type(attributes);
+    psa_ecc_family_t curve = PSA_KEY_TYPE_ECC_GET_FAMILY(key_type);
+
+    /* If the attr_bits are not set we need to calculate them. */
+    if (attr_bits == 0) {
+        attr_bits = calculate_key_size(key_type, data_length);
+    } else {
+        /* There is no need to validate the key size if we just calculated it. */
+        err = validate_key_size(key_type, attr_bits);
+        if (err != PSA_SUCCESS) {
+            return err;
+        }
+    }
+
+    /* TODO: Implement proper curve validation. */
+
+    memcpy(key_buffer, data, data_length);
+    *key_bits = attr_bits;
+    *key_buffer_length = data_length;
+
+    return PSA_SUCCESS;
+}
 /** @} */ // end of psa_key_generation
